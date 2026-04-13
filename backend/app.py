@@ -13,6 +13,7 @@ import json
 import time
 import shutil
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -22,13 +23,24 @@ from contextlib import asynccontextmanager
 import httpx
 import yaml
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from hermes_bridge import HermesBridge
 from wsl_bridge import wsl_bridge
+from auth import require_auth, get_or_create_token, set_auth_enabled, is_auth_enabled
+from models import ChatRequest, AgentRequest, PersonaUpdate, MemoryUpdate
+
+# ── Logging ──────────────────────────────────────────────────────
+
+logger = logging.getLogger("hermes_webui")
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 # ── Configuration ─────────────────────────────────────────────────
@@ -217,6 +229,18 @@ WINDOWS_HOME = wsl_bridge.windows_home  # e.g. "/mnt/c/Users/47291" or None
 conversations: dict = {}
 current_session_id: str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+# Session locks to prevent concurrent write races
+_session_locks: dict[str, asyncio.Lock] = {}
+_locks_lock = asyncio.Lock()
+
+
+async def get_session_lock(session_id: str) -> asyncio.Lock:
+    """Get or create a lock for a specific session."""
+    async with _locks_lock:
+        if session_id not in _session_locks:
+            _session_locks[session_id] = asyncio.Lock()
+        return _session_locks[session_id]
+
 # Sessions directory for persistence
 SESSIONS_DIR = Path.home() / ".hermes-webui" / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -227,37 +251,67 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     # Load all sessions from disk
     load_all_sessions()
-    
+
     persona = load_persona()
-    print("=" * 60)
-    print(f"  马鞍 Saddle — The Saddle for Hermes")
-    print("=" * 60)
-    print(f"  Hermes home : {bridge.hermes_home}")
-    print(f"  Hermes CLI  : {HERMES_CMD or 'NOT FOUND — install hermes-agent'}")
+    logger.info("=" * 60)
+    logger.info("  马鞍 Saddle — The Saddle for Hermes")
+    logger.info("=" * 60)
+    logger.info(f"  Hermes home : {bridge.hermes_home}")
+    logger.info(f"  Hermes CLI  : {HERMES_CMD or 'NOT FOUND — install hermes-agent'}")
     if wsl_bridge.is_wsl:
-        print(f"  WSL2 env    : {wsl_bridge.wsl_distro} (Windows home: {WINDOWS_HOME})")
-    print(f"  Ollama URL  : {bridge.get_ollama_url()}")
-    print(f"  Model       : {bridge.get_default_model()}")
-    print(f"  Skills      : {len(bridge.get_skills())} installed")
-    print(f"  Sessions    : {len(conversations)} loaded")
-    print(f"  Setup done  : {persona.get('setup_complete', False)}")
-    print("=" * 60)
+        logger.info(f"  WSL2 env    : {wsl_bridge.wsl_distro} (Windows home: {WINDOWS_HOME})")
+    logger.info(f"  Ollama URL  : {bridge.get_ollama_url()}")
+    logger.info(f"  Model       : {bridge.get_default_model()}")
+    logger.info(f"  Skills      : {len(bridge.get_skills())} installed")
+    logger.info(f"  Sessions    : {len(conversations)} loaded")
+    logger.info(f"  Auth        : {'disabled (--no-auth)' if not is_auth_enabled() else 'enabled'}")
+    if is_auth_enabled():
+        token = get_or_create_token()
+        logger.info(f"  Token       : {token}")
+    logger.info(f"  Setup done  : {persona.get('setup_complete', False)}")
+    logger.info("=" * 60)
     yield
-    print("\nShutting down...")
+    # Graceful shutdown: persist all sessions
+    logger.info("Shutting down — saving all sessions...")
+    for sid, msgs in conversations.items():
+        save_session(sid, msgs)
+    logger.info(f"Saved {len(conversations)} sessions. Goodbye.")
 
 
 # ── FastAPI App ───────────────────────────────────────────────────
 
+# ── CORS Configuration ───────────────────────────────────────────
+
+def _get_cors_origins() -> list[str]:
+    """Build allowed CORS origins from config and environment."""
+    origins = [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+    ]
+    # Allow custom origins from environment
+    env_origins = os.environ.get("HERMES_CORS_ORIGINS", "")
+    if env_origins:
+        origins.extend(o.strip() for o in env_origins.split(",") if o.strip())
+    # Allow custom origins from config
+    config_origins = config.get("allowed_origins", [])
+    if isinstance(config_origins, list):
+        origins.extend(config_origins)
+    return origins
+
+
 app = FastAPI(
     title="马鞍 Saddle",
     description="The Saddle for Hermes — WebUI for Hermes Agent",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
+    dependencies=[Depends(require_auth)],
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -276,26 +330,25 @@ async def get_persona():
 
 
 @app.put("/api/persona")
-async def update_persona(request: Request):
+async def update_persona(body: PersonaUpdate):
     """Update agent personalization."""
-    body = await request.json()
     persona = load_persona()
 
-    # Update allowed fields
-    for key in ("agent_name", "agent_subtitle", "user_display_name", "avatar", "user_avatar", "avatar_preset", "setup_complete"):
-        if key in body:
-            persona[key] = body[key]
+    # Update allowed fields from validated model
+    updates = body.model_dump(exclude_none=True, exclude={"theme"})
+    for key, value in updates.items():
+        persona[key] = value
 
     # Handle theme
-    if "theme" in body:
-        theme = body["theme"]
-        preset = theme.get("preset", "")
+    if body.theme:
+        theme = body.theme
+        preset = theme.preset or ""
         if preset in THEME_PRESETS:
             persona["theme"] = {**THEME_PRESETS[preset], "preset": preset}
-        elif preset == "custom" and "accent" in theme:
+        elif preset == "custom" and theme.accent:
             persona["theme"] = {
-                "accent": theme["accent"],
-                "accent_dim": theme.get("accent_dim", theme["accent"]),
+                "accent": theme.accent,
+                "accent_dim": theme.accent_dim or theme.accent,
                 "preset": "custom",
             }
 
@@ -561,15 +614,12 @@ async def get_memories():
 
 
 @app.put("/api/memories/{filename}")
-async def update_memory(filename: str, request: Request):
+async def update_memory(filename: str, body: MemoryUpdate):
     """Update a memory file."""
     if filename not in ("SOUL.md", "MEMORY.md", "USER.md"):
         raise HTTPException(status_code=400, detail="Invalid memory file")
 
-    body = await request.json()
-    content = body.get("content", "")
-
-    if bridge.write_memory(filename, content):
+    if bridge.write_memory(filename, body.content):
         return {"status": "ok"}
     else:
         raise HTTPException(status_code=500, detail="Failed to write memory")
@@ -726,18 +776,17 @@ async def get_session_messages(session_id: str):
 
 
 @app.post("/api/chat")
-async def chat(request: Request):
+async def chat(body: ChatRequest):
     """
     Main chat endpoint.
     Injects Hermes memories into the system prompt, sends to Ollama,
     and stores conversation history.
     """
-    body = await request.json()
-    user_message = body.get("message", "")
-    session_id = body.get("session_id", current_session_id)
+    user_message = body.message
+    session_id = body.session_id or current_session_id
 
     # Get model - from request, config, or auto-select first available
-    model = body.get("model", "")
+    model = body.model or ""
     if not model:
         model = bridge.get_default_model()
     if not model:
@@ -757,79 +806,78 @@ async def chat(request: Request):
     if not model:
         raise HTTPException(status_code=400, detail="No model available")
 
-    if not user_message:
-        raise HTTPException(status_code=400, detail="Empty message")
+    lock = await get_session_lock(session_id)
+    async with lock:
+        # Initialize session if needed
+        if session_id not in conversations:
+            conversations[session_id] = []
 
-    # Initialize session if needed
-    if session_id not in conversations:
-        conversations[session_id] = []
+        # Record user message
+        conversations[session_id].append({
+            "role": "user",
+            "content": user_message,
+            "timestamp": datetime.now().isoformat(),
+        })
 
-    # Record user message
-    conversations[session_id].append({
-        "role": "user",
-        "content": user_message,
-        "timestamp": datetime.now().isoformat(),
-    })
+        # Build system prompt from Hermes memories
+        system_prompt = bridge.build_system_prompt()
 
-    # Build system prompt from Hermes memories
-    system_prompt = bridge.build_system_prompt()
+        # Build message history for context
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
 
-    # Build message history for context
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
+        # Include recent conversation history (last 20 messages for context)
+        recent = conversations[session_id][-20:]
+        for msg in recent:
+            messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # Include recent conversation history (last 20 messages for context)
-    recent = conversations[session_id][-20:]
-    for msg in recent:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+        # Call Ollama
+        ollama_url = bridge.get_ollama_url()
+        start_time = time.time()
 
-    # Call Ollama
-    ollama_url = bridge.get_ollama_url()
-    start_time = time.time()
-
-    try:
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(
-                f"{ollama_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                },
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(
+                    f"{ollama_url}/v1/chat/completions",
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "stream": False,
+                    },
+                )
+                data = resp.json()
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Ollama request failed: {e}",
             )
-            data = resp.json()
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Ollama request failed: {e}",
-        )
 
-    latency_ms = int((time.time() - start_time) * 1000)
+        latency_ms = int((time.time() - start_time) * 1000)
 
-    # Extract response
-    assistant_content = ""
-    if "choices" in data and data["choices"]:
-        assistant_content = data["choices"][0].get("message", {}).get(
-            "content", ""
-        )
-    elif "message" in data:
-        assistant_content = data["message"].get("content", "")
+        # Extract response
+        assistant_content = ""
+        if "choices" in data and data["choices"]:
+            assistant_content = data["choices"][0].get("message", {}).get(
+                "content", ""
+            )
+        elif "message" in data:
+            assistant_content = data["message"].get("content", "")
 
-    if not assistant_content:
-        assistant_content = "No response received."
+        if not assistant_content:
+            assistant_content = "No response received."
 
-    # Record assistant message
-    conversations[session_id].append({
-        "role": "assistant",
-        "content": assistant_content,
-        "timestamp": datetime.now().isoformat(),
-        "model": model,
-        "latency_ms": latency_ms,
-    })
+        # Record assistant message
+        conversations[session_id].append({
+            "role": "assistant",
+            "content": assistant_content,
+            "timestamp": datetime.now().isoformat(),
+            "model": model,
+            "latency_ms": latency_ms,
+        })
 
-    # Save session to disk
-    save_session(session_id, conversations[session_id])
+        # Save session to disk
+        save_session(session_id, conversations[session_id])
 
     return {
         "content": assistant_content,
@@ -840,17 +888,16 @@ async def chat(request: Request):
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: Request):
+async def chat_stream(body: ChatRequest):
     """
     Streaming chat endpoint using SSE.
     Sends tokens as they arrive from Ollama, then a final [DONE] event
     with metadata (model, latency_ms, session_id).
     """
-    body = await request.json()
-    user_message = body.get("message", "")
-    session_id = body.get("session_id", current_session_id)
+    user_message = body.message
+    session_id = body.session_id or current_session_id
 
-    model = body.get("model", "")
+    model = body.model or ""
     if not model:
         model = bridge.get_default_model()
     if not model:
@@ -946,7 +993,7 @@ async def chat_stream(request: Request):
 # ── Agent Mode (Hermes CLI proxy) ────────────────────────────────
 
 @app.post("/api/agent/run")
-async def agent_run(request: Request):
+async def agent_run(body: AgentRequest):
     """
     Agent endpoint: proxies the user message to the local Hermes CLI
     and streams back its output line by line as SSE.
@@ -963,12 +1010,8 @@ async def agent_run(request: Request):
             detail="Hermes CLI not found. Install it with: pip install hermes-agent",
         )
 
-    body = await request.json()
-    user_message = body.get("message", "").strip()
-    session_id = body.get("session_id", current_session_id)
-
-    if not user_message:
-        raise HTTPException(status_code=400, detail="Empty message")
+    user_message = body.message.strip()
+    session_id = body.session_id or current_session_id
 
     # Record user message
     if session_id not in conversations:
@@ -1105,7 +1148,18 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8080, help="Port")
     parser.add_argument("--hermes-home", default=None, help="Hermes home dir")
+    parser.add_argument("--no-auth", action="store_true", help="Disable API token authentication")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Logging level (default: INFO)")
+    parser.add_argument("--cors-origin", action="append", default=[], help="Additional CORS origins")
     args = parser.parse_args()
+
+    # Configure logging level
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Configure auth
+    if args.no_auth:
+        set_auth_enabled(False)
 
     if args.hermes_home:
         bridge.hermes_home = Path(args.hermes_home)

@@ -939,6 +939,22 @@
     </div>
 </div>
 
+<!-- ===================== AUTH TOKEN MODAL ===================== -->
+<div id="authModal" class="modal-overlay" style="z-index:400;">
+    <div class="w-full max-w-[420px] bg-surface-container rounded-2xl shadow-2xl border border-outline-variant p-8 relative mx-6">
+        <div class="flex flex-col items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-surface-container-lowest flex items-center justify-center border border-outline-variant">
+                <span class="material-symbols-outlined text-primary text-3xl">lock</span>
+            </div>
+            <h2 class="font-headline text-xl font-bold text-on-surface">Authentication Required</h2>
+            <p class="text-sm text-on-surface-variant text-center">Enter the API token shown in the server terminal.</p>
+            <input id="authTokenInput" type="password" class="w-full bg-surface-container-lowest border border-outline-variant rounded-xl px-4 py-3 text-center font-mono text-sm text-on-surface placeholder:text-outline focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none" placeholder="Paste token here...">
+            <button onclick="submitAuthToken()" class="w-full bg-primary-container text-on-primary font-bold py-3 px-6 rounded-xl text-sm transition-all active:scale-95">Authenticate</button>
+            <p id="authError" class="text-xs text-error hidden">Invalid token. Please try again.</p>
+        </div>
+    </div>
+</div>
+
 <!-- ===================== TOAST NOTIFICATION ===================== -->
 <div id="saveToast" class="fixed top-4 right-4 z-[999] px-5 py-3 rounded-xl text-sm font-bold transition-all duration-300 opacity-0 translate-y-[-20px] pointer-events-none bg-primary-container text-on-primary">
     <span class="material-symbols-outlined text-sm align-middle mr-1">check_circle</span>
@@ -958,6 +974,68 @@ const API_BASE = (window.location.protocol === 'file:')
 function apiUrl(path) {
     return API_BASE + path;
 }
+
+// ── Authentication ──────────────────────────────────────────────
+function getAuthToken() {
+    return localStorage.getItem('hermes_webui_token') || '';
+}
+
+function setAuthToken(token) {
+    localStorage.setItem('hermes_webui_token', token);
+}
+
+function authHeaders(extra = {}) {
+    const token = getAuthToken();
+    const headers = { ...extra };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    return headers;
+}
+
+// Wrapper around fetch that injects auth token
+async function apiFetch(url, options = {}) {
+    options.headers = authHeaders(options.headers || {});
+    const resp = await fetch(url, options);
+    if (resp.status === 401) {
+        showAuthModal();
+        throw new Error('Authentication required');
+    }
+    return resp;
+}
+
+function showAuthModal() {
+    document.getElementById('authModal').classList.add('active');
+    document.getElementById('authTokenInput').focus();
+}
+
+function hideAuthModal() {
+    document.getElementById('authModal').classList.remove('active');
+    document.getElementById('authError').classList.add('hidden');
+}
+
+async function submitAuthToken() {
+    const token = document.getElementById('authTokenInput').value.trim();
+    if (!token) return;
+    setAuthToken(token);
+    try {
+        const resp = await fetch(apiUrl('/api/persona'), { headers: { 'Authorization': 'Bearer ' + token } });
+        if (resp.status === 401) {
+            document.getElementById('authError').classList.remove('hidden');
+            return;
+        }
+        hideAuthModal();
+        init(); // Re-initialize after successful auth
+    } catch (e) {
+        document.getElementById('authError').classList.remove('hidden');
+    }
+}
+
+// Handle Enter key in auth input
+document.addEventListener('DOMContentLoaded', () => {
+    const authInput = document.getElementById('authTokenInput');
+    if (authInput) authInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitAuthToken();
+    });
+});
 
 // Default avatar for new users
 const DEFAULT_AVATAR_URL = 'logo.png';
@@ -1171,7 +1249,7 @@ function adjustBrightness(hex, percent) {
 // ── Persona Load / Save ─────────────────────────────────────────
 async function loadPersona() {
     try {
-        const resp = await fetch(apiUrl('/api/persona'));
+        const resp = await apiFetch(apiUrl('/api/persona'));
         const data = await resp.json();
         persona = data;
         themePresets = data.theme_presets || {};
@@ -1186,7 +1264,7 @@ async function loadPersona() {
 
 async function savePersonaToServer(updates) {
     try {
-        const resp = await fetch(apiUrl('/api/persona'), {
+        const resp = await apiFetch(apiUrl('/api/persona'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updates),
@@ -1208,7 +1286,7 @@ async function uploadAvatar(file) {
     const formData = new FormData();
     formData.append('file', file);
     try {
-        const resp = await fetch(apiUrl('/api/persona/avatar'), { method: 'POST', body: formData });
+        const resp = await apiFetch(apiUrl('/api/persona/avatar'), { method: 'POST', body: formData });
         const data = await resp.json();
         if (data.avatar) {
             // Add cache-buster so browser reloads the new image
@@ -1224,7 +1302,7 @@ async function uploadUserAvatar(file) {
     formData.append('file', file);
     formData.append('type', 'user');
     try {
-        const resp = await fetch(apiUrl('/api/persona/avatar'), { method: 'POST', body: formData });
+        const resp = await apiFetch(apiUrl('/api/persona/avatar'), { method: 'POST', body: formData });
         const data = await resp.json();
         if (data.avatar) {
             // Add cache-buster so browser reloads the new image
@@ -1443,7 +1521,7 @@ async function init() {
 
 async function loadStatus() {
     try {
-        const resp = await fetch(apiUrl('/api/status'));
+        const resp = await apiFetch(apiUrl('/api/status'));
         const data = await resp.json();
         const dot = document.getElementById('statusDot');
         const text = document.getElementById('statusText');
@@ -1512,7 +1590,7 @@ async function loadStatus() {
 
 async function loadModels() {
     try {
-        const resp = await fetch(apiUrl('/api/models'));
+        const resp = await apiFetch(apiUrl('/api/models'));
         const data = await resp.json();
         modelSelector.innerHTML = '';
         data.models.forEach(m => {
@@ -1533,7 +1611,7 @@ modelSelector.addEventListener('change', function() {
 
 async function loadMemories() {
     try {
-        const resp = await fetch(apiUrl('/api/memories'));
+        const resp = await apiFetch(apiUrl('/api/memories'));
         const data = await resp.json();
         document.getElementById('memorySoul').textContent = data['SOUL.md'] || '(empty)';
         document.getElementById('memoryMemory').textContent = data['MEMORY.md'] || '(empty)';
@@ -1543,7 +1621,7 @@ async function loadMemories() {
 
 async function loadSkills() {
     try {
-        const resp = await fetch(apiUrl('/api/skills'));
+        const resp = await apiFetch(apiUrl('/api/skills'));
         const data = await resp.json();
         const container = document.getElementById('skillsContainer');
         container.innerHTML = '';
@@ -1612,7 +1690,7 @@ async function editMemory(filename) {
     editingMemoryFile = filename;
     document.getElementById('memoryModalTitle').textContent = filename;
     try {
-        const resp = await fetch(apiUrl('/api/memories'));
+        const resp = await apiFetch(apiUrl('/api/memories'));
         const data = await resp.json();
         const content = data[filename] || '';
         document.getElementById('memoryEditor').value = content;
@@ -1635,7 +1713,7 @@ document.getElementById('memoryEditor').addEventListener('input', function() {
 async function saveMemory() {
     const content = document.getElementById('memoryEditor').value;
     try {
-        await fetch(apiUrl(`/api/memories/${editingMemoryFile}`), {
+        await apiFetch(apiUrl(`/api/memories/${editingMemoryFile}`), {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content }),
         });
@@ -1663,7 +1741,7 @@ async function checkForUpdate() {
     applyBtn.style.display = 'none';
 
     try {
-        const resp = await fetch(apiUrl('/api/update/check'));
+        const resp = await apiFetch(apiUrl('/api/update/check'));
         const data = await resp.json();
 
         if (data.local_commit) localVer.textContent = data.local_commit;
@@ -1696,7 +1774,7 @@ async function applyUpdate() {
     logEl.innerHTML = '';
 
     try {
-        const resp = await fetch(apiUrl('/api/update/apply'), { method: 'POST' });
+        const resp = await apiFetch(apiUrl('/api/update/apply'), { method: 'POST' });
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -1752,7 +1830,7 @@ async function importSkill(event) {
     const formData = new FormData();
     formData.append('file', file);
     try {
-        const resp = await fetch(apiUrl('/api/skills/import'), { method: 'POST', body: formData });
+        const resp = await apiFetch(apiUrl('/api/skills/import'), { method: 'POST', body: formData });
         const data = await resp.json();
         if (data.status === 'ok') {
             showToast('Skill imported successfully!');
@@ -1769,7 +1847,7 @@ async function importSkill(event) {
 async function deleteSession(sessionId) {
     if (!confirm('Delete this conversation?')) return;
     try {
-        await fetch(apiUrl(`/api/sessions/${sessionId}`), { method: 'DELETE' });
+        await apiFetch(apiUrl(`/api/sessions/${sessionId}`), { method: 'DELETE' });
         if (currentSessionId === sessionId) {
             currentSessionId = '';
             chatContainer.innerHTML = `<div id="emptyState" class="flex flex-col items-center justify-center py-20 text-on-surface-variant/30"><span class="material-symbols-outlined text-6xl mb-4 opacity-20">chat</span><p id="emptyStateText" class="text-sm mb-1">Start talking to ${escapeHtml(persona.agent_name || 'My Agent')}</p><p class="text-[10px] text-on-surface-variant/20">Memory synced with Hermes CLI</p></div>`;
@@ -1781,7 +1859,7 @@ async function deleteSession(sessionId) {
 // ── Sessions ────────────────────────────────────────────────────
 async function loadSessions() {
     try {
-        const resp = await fetch(apiUrl('/api/sessions'));
+        const resp = await apiFetch(apiUrl('/api/sessions'));
         const data = await resp.json();
         const sessionList = document.getElementById('sessionList');
         sessionList.innerHTML = '';
@@ -1820,7 +1898,7 @@ async function switchSession(sessionId) {
 
 async function loadSessionMessages(sessionId) {
     try {
-        const resp = await fetch(apiUrl(`/api/sessions/${sessionId}/messages`));
+        const resp = await apiFetch(apiUrl(`/api/sessions/${sessionId}/messages`));
         const data = await resp.json();
         chatContainer.innerHTML = '';
         if (data.messages.length === 0) {
@@ -1837,7 +1915,7 @@ async function loadSessionMessages(sessionId) {
 
 async function newSession() {
     try {
-        const resp = await fetch(apiUrl('/api/sessions/new'), { method: 'POST' });
+        const resp = await apiFetch(apiUrl('/api/sessions/new'), { method: 'POST' });
         const data = await resp.json();
         currentSessionId = data.session_id;
         await loadSessions();
@@ -1959,7 +2037,7 @@ async function sendMessage() {
     addThinkingIndicator();
 
     try {
-        const resp = await fetch(apiUrl('/api/agent/run'), {
+        const resp = await apiFetch(apiUrl('/api/agent/run'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message, session_id: currentSessionId }),
