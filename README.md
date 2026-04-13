@@ -69,9 +69,9 @@ Gemma、Llama、Qwen、DeepSeek……只要 Ollama 能跑的模型，Hermes WebU
 **Works with any Ollama model.** Gemma, Llama, Qwen, DeepSeek — if Ollama can run it, Hermes WebUI supports it. Switch models on the fly without restarting.
 
 ### ⚡ 一键启动，开箱即用
-Windows 双击 `start-windows.bat`，Linux/Mac 运行 `./scripts/start.sh`，自动创建虚拟环境、安装依赖、启动服务。
+Windows 双击 `launch.bat`，Linux/Mac 运行 `./scripts/start.sh`，自动创建虚拟环境、安装依赖、启动服务。
 
-**One-click start.** Double-click `start-windows.bat` on Windows or run `./scripts/start.sh` on Linux/Mac. Auto-creates venv, installs deps, starts the server.
+**One-click start.** Double-click `launch.bat` on Windows or run `./scripts/start.sh` on Linux/Mac. Auto-creates venv, installs deps, starts the server.
 
 ---
 
@@ -96,7 +96,7 @@ git clone https://github.com/songchao4218/hermes-webui.git
 cd hermes-webui
 
 # 2. 启动
-# Windows: 双击 start-windows.bat
+# Windows: 双击 launch.bat
 # macOS:   ./scripts/install-macos.sh
 # Linux:   ./scripts/start.sh
 ```
@@ -105,7 +105,7 @@ cd hermes-webui
 
 | 平台 | 命令 | 说明 |
 |-----|------|------|
-| Windows | 双击 `start-windows.bat` | 全自动向导：检测 WSL2 → 安装 Hermes → 安装 Ollama → 下载模型 → 启动服务 |
+| Windows | 双击 `launch.bat` | 自动检测 Python、创建虚拟环境、安装依赖、找空闲端口、启动服务 |
 | macOS | `./scripts/install-macos.sh` | 智能检测：硬件评分 → 推荐模型 → 自动安装 → 配置远程（可选）|
 | Linux | `./scripts/start.sh` | 标准启动，需提前安装 Hermes 和 Ollama |
 
@@ -263,7 +263,9 @@ hermes-webui/
 ├── docs/
 │   ├── DESIGN.md           # UI 设计系统文档
 │   └── banner.png
-├── start-windows.bat       # Windows 完整安装向导
+├── launch.bat              # Windows 双击启动入口
+├── scripts/
+│   ├── start-windows.bat   # Windows 启动脚本（launch.bat 调用此文件）
 ├── docker-compose.yml
 └── .env.example            # 环境变量示例
 ```
