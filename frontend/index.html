@@ -2037,31 +2037,51 @@ async function sendMessage() {
     addThinkingIndicator();
 
     try {
-        const resp = await apiFetch(apiUrl('/api/agent/run'), {
+        // Step 1: classify intent — agent or plain chat?
+        let needsAgent = false;
+        try {
+            const clf = await apiFetch(apiUrl('/api/chat/classify'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, model: currentModel, session_id: currentSessionId }),
+            });
+            if (clf.ok) {
+                const clfData = await clf.json();
+                needsAgent = clfData.needs_agent === true;
+            }
+        } catch (e) { /* classify failed, default to chat */ }
+
+        // Step 2: route to agent or stream chat
+        const endpoint = needsAgent ? '/api/agent/run' : '/api/chat/stream';
+        const agentResp = await apiFetch(apiUrl(endpoint), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, session_id: currentSessionId }),
+            body: JSON.stringify({ message, model: currentModel, session_id: currentSessionId }),
         });
 
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({ detail: 'Request failed: ' + resp.status }));
+        // 503 = Hermes CLI not installed → fall back to /api/chat/stream
+        let finalResp;
+        if (agentResp.status === 503) {
+            finalResp = await apiFetch(apiUrl('/api/chat/stream'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, model: currentModel, session_id: currentSessionId }),
+            });
+        } else {
+            finalResp = agentResp;
+        }
+
+        if (!finalResp.ok) {
+            const err = await finalResp.json().catch(() => ({ detail: 'Request failed: ' + finalResp.status }));
             removeThinkingIndicator();
-            // Show install instructions if Hermes CLI not found
-            if (resp.status === 503) {
-                addAssistantMessage(
-                    '⚠️ **Hermes CLI not found**\n\nInstall it first:\n```bash\npip install hermes-agent\n```\nThen restart Hermes WebUI.',
-                    '', 0
-                );
-            } else {
-                addAssistantMessage('Error: ' + (err.detail || resp.status), '', 0);
-            }
+            addAssistantMessage('Error: ' + (err.detail || finalResp.status), '', 0);
             return;
         }
 
         removeThinkingIndicator();
         const { contentEl } = addAssistantMessageStreaming();
 
-        const reader = resp.body.getReader();
+        const reader = finalResp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         const renderer = new StreamRenderer(contentEl);
@@ -2081,7 +2101,7 @@ async function sendMessage() {
                     if (data.done) {
                         renderer.finish();
                         document.getElementById('latencyDisplay').textContent = data.latency_ms + 'ms';
-                        document.getElementById('modelDisplay').textContent = 'Hermes Agent';
+                        document.getElementById('modelDisplay').textContent = data.model || 'Hermes Agent';
                         scrollToBottom();
                     }
                 } catch (e) { /* skip malformed chunk */ }

@@ -887,6 +887,53 @@ async def chat(body: ChatRequest):
     }
 
 
+@app.post("/api/chat/classify")
+async def classify_intent(body: ChatRequest):
+    """
+    Lightweight intent classifier.
+    Returns {"needs_agent": true/false} by asking the LLM a single yes/no question.
+    Fast: uses a tiny prompt with max_tokens=1.
+    """
+    keywords_agent = [
+        "创建", "删除", "修改", "运行", "执行", "打开", "关闭", "安装", "下载",
+        "写入", "保存", "搜索文件", "列出文件", "截图", "浏览器", "网页",
+        "create", "delete", "run", "execute", "open", "install", "download",
+        "write file", "save file", "search file", "screenshot", "browser",
+        "skill", "技能", "agent", "代理",
+    ]
+    msg_lower = body.message.lower()
+    # Fast path: keyword match
+    if any(k in msg_lower for k in keywords_agent) and HERMES_CMD:
+        return {"needs_agent": True, "method": "keyword"}
+
+    # If no Hermes CLI, always chat
+    if not HERMES_CMD:
+        return {"needs_agent": False, "method": "no_cli"}
+
+    # LLM classification for ambiguous cases
+    ollama_url = bridge.get_ollama_url()
+    model = body.model or bridge.get_default_model()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{ollama_url}/v1/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are an intent classifier. Reply with only 'yes' or 'no'."},
+                        {"role": "user", "content": f"Does this request require executing code, managing files, using tools, or controlling a computer? Request: \"{body.message}\""},
+                    ],
+                    "stream": False,
+                    "max_tokens": 2,
+                },
+            )
+            answer = resp.json()["choices"][0]["message"]["content"].strip().lower()
+            needs_agent = answer.startswith("y")
+            return {"needs_agent": needs_agent, "method": "llm"}
+    except Exception:
+        return {"needs_agent": False, "method": "fallback"}
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(body: ChatRequest):
     """
@@ -1027,15 +1074,28 @@ async def agent_run(body: AgentRequest):
         start_time = time.time()
 
         # Use WSLBridge to determine working directory
-        # Prefer Windows home so Hermes can access Windows files via /mnt/c/
         work_dir = wsl_bridge.get_working_directory()
 
         # Convert user input: Windows paths → WSL paths
         query = wsl_bridge.convert_user_input(user_message)
 
-        # Add WSL context prompt for the LLM
-        context_prompt = wsl_bridge.get_context_prompt()
-        if context_prompt:
+        # Inject Windows path context so Hermes knows where to find files
+        # Even when backend runs on Windows (not in WSL), we know the Windows home
+        windows_home = wsl_bridge.windows_home
+        if not windows_home:
+            # Derive from Windows USERNAME env var
+            username = os.environ.get("USERNAME", "")
+            if username:
+                windows_home = f"/mnt/c/Users/{username}"
+
+        if windows_home:
+            context_prompt = (
+                f"[System: Running via WSL2. Windows home is at {windows_home}. "
+                f"Desktop={windows_home}/Desktop, Downloads={windows_home}/Downloads, "
+                f"Documents={windows_home}/Documents. "
+                f"Always use /mnt/c/... paths to access Windows files. "
+                f"Execute tasks directly without asking for clarification.]"
+            )
             query = f"{context_prompt}\n\n{query}"
 
         try:
@@ -1082,6 +1142,10 @@ async def agent_run(body: AgentRequest):
                     line = wsl_bridge.convert_output(line)
 
                 full_output.append(line)
+                # Don't render the final done JSON as a token
+                stripped = line.strip()
+                if stripped.startswith('{"done":') or stripped.startswith('{"error":'):
+                    continue
                 yield f"data: {json.dumps({'token': line})}\n\n"
 
             await proc.wait()

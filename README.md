@@ -141,6 +141,7 @@ ollama pull deepseek-r1:8b
 | 功能 | 说明 |
 |------|------|
 | 💬 **聊天界面** | 多会话、历史持久化、延迟显示、流式响应（SSE） |
+| 🤖 **智能路由** | 自动判断意图：普通对话走 Ollama，文件/代码/工具操作自动切换 Agent 模式 |
 | 🧠 **记忆编辑器** | 直接编辑 SOUL.md、MEMORY.md、USER.md，与 Hermes CLI 实时同步 |
 | ⚡ **技能浏览器** | 查看已安装 Hermes Skill，支持 ZIP 包导入 |
 | 🎨 **动态主题** | 5 种预设主题色（amber/cyan/purple/green/rose）+ 自定义颜色 |
@@ -332,6 +333,8 @@ pytest tests/test_sessions.py -v    # 会话管理测试
 - [x] macOS 即开即用（硬件检测 + 智能模型推荐 + 远程 Ollama）
 - [x] 一键自动更新（流式输出 git pull 日志）
 - [x] 完整测试套件（pytest，覆盖认证/记忆/安全/会话）
+- [x] **智能路由**（关键词+LLM意图分类，自动切换 Chat / Agent 模式）
+- [x] **WSL2 Windows 路径注入**（Agent 模式自动感知 Windows 文件系统）
 - [ ] 语音输入 / 输出
 - [ ] 移动端适配
 
