@@ -1,0 +1,41 @@
+# 马鞍 Ma'an WebUI
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temp
+tmp/
+*.tmp
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Stitch design source (not needed for runtime)
+stitch/
+
+# Local data
+~/.maan/
+~/.hermes/
+~/.ollama/
