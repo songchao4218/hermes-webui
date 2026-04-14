@@ -27,6 +27,9 @@ from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Dep
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from hermes_bridge import HermesBridge
 from wsl_bridge import wsl_bridge
@@ -89,6 +92,11 @@ THEME_PRESETS = {
 }
 
 
+# ── Rate Limiter ─────────────────────────────────────────────────
+# Limits chat/agent requests per IP to prevent accidental Ollama overload.
+limiter = Limiter(key_func=get_remote_address)
+
+
 def load_persona() -> dict:
     """Load user's agent personalization."""
     import copy
@@ -113,6 +121,15 @@ def save_persona(persona: dict):
     PERSONA_DIR.mkdir(parents=True, exist_ok=True)
     with open(PERSONA_FILE, "w", encoding="utf-8") as f:
         json.dump(persona, f, ensure_ascii=False, indent=2)
+
+
+def _evict_old_sessions():
+    """Keep at most 100 sessions in memory; evict oldest by session_id (timestamp-based)."""
+    MAX_SESSIONS = 100
+    if len(conversations) > MAX_SESSIONS:
+        sorted_keys = sorted(conversations.keys())
+        for key in sorted_keys[:len(conversations) - MAX_SESSIONS]:
+            del conversations[key]
 
 
 def save_session(session_id: str, messages: list):
@@ -205,11 +222,19 @@ def find_hermes_cmd() -> Optional[str]:
             return str(p)
     
     # 5. WSL wrapper script (for Windows users with WSL Hermes)
+    # Only use if WSL is actually available on this machine
     wrapper = Path(__file__).parent / "hermes_wrapper.bat"
     if wrapper.exists():
-        return str(wrapper)
+        try:
+            result = subprocess.run(
+                ["wsl", "--status"], capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                return str(wrapper)
+        except Exception:
+            pass
 
-    # 4. Wrapper script (e.g. ~/start-hermes.sh)
+    # 6. Wrapper script (e.g. ~/start-hermes.sh)
     wrapper = Path.home() / "start-hermes.sh"
     if wrapper.exists() and os.access(wrapper, os.X_OK):
         return str(wrapper)
@@ -289,6 +314,10 @@ def _get_cors_origins() -> list[str]:
         "http://127.0.0.1:8080",
         "http://localhost:8081",
         "http://127.0.0.1:8081",
+        "http://localhost:8082",
+        "http://127.0.0.1:8082",
+        "http://localhost:8083",
+        "http://127.0.0.1:8083",
     ]
     # Allow custom origins from environment
     env_origins = os.environ.get("HERMES_CORS_ORIGINS", "")
@@ -304,10 +333,13 @@ def _get_cors_origins() -> list[str]:
 app = FastAPI(
     title="马鞍 Saddle",
     description="The Saddle for Hermes — WebUI for Hermes Agent",
-    version="0.5.0",
+    version="0.5.1",
     lifespan=lifespan,
     dependencies=[Depends(require_auth)],
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -377,8 +409,16 @@ async def upload_avatar(file: UploadFile = File(...), type: str = Form(default="
     filename = f"{type}_avatar.{ext}" if type == "user" else f"avatar.{ext}"
     filepath = AVATAR_DIR / filename
 
+    # Enforce 5 MB file size limit
+    MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
+    content = await file.read()
+    if len(content) > MAX_AVATAR_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Avatar file too large. Maximum size is 5 MB.",
+        )
+
     with open(filepath, "wb") as f:
-        content = await file.read()
         f.write(content)
 
     # Update persona
@@ -741,6 +781,7 @@ async def new_session():
     global current_session_id
     current_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     conversations[current_session_id] = []
+    _evict_old_sessions()
     return {"session_id": current_session_id}
 
 
@@ -776,7 +817,8 @@ async def get_session_messages(session_id: str):
 
 
 @app.post("/api/chat")
-async def chat(body: ChatRequest):
+@limiter.limit("60/minute")
+async def chat(request: Request, body: ChatRequest):
     """
     Main chat endpoint.
     Injects Hermes memories into the system prompt, sends to Ollama,
@@ -887,55 +929,9 @@ async def chat(body: ChatRequest):
     }
 
 
-@app.post("/api/chat/classify")
-async def classify_intent(body: ChatRequest):
-    """
-    Lightweight intent classifier.
-    Returns {"needs_agent": true/false} by asking the LLM a single yes/no question.
-    Fast: uses a tiny prompt with max_tokens=1.
-    """
-    keywords_agent = [
-        "创建", "删除", "修改", "运行", "执行", "打开", "关闭", "安装", "下载",
-        "写入", "保存", "搜索文件", "列出文件", "截图", "浏览器", "网页",
-        "create", "delete", "run", "execute", "open", "install", "download",
-        "write file", "save file", "search file", "screenshot", "browser",
-        "skill", "技能", "agent", "代理",
-    ]
-    msg_lower = body.message.lower()
-    # Fast path: keyword match
-    if any(k in msg_lower for k in keywords_agent) and HERMES_CMD:
-        return {"needs_agent": True, "method": "keyword"}
-
-    # If no Hermes CLI, always chat
-    if not HERMES_CMD:
-        return {"needs_agent": False, "method": "no_cli"}
-
-    # LLM classification for ambiguous cases
-    ollama_url = bridge.get_ollama_url()
-    model = body.model or bridge.get_default_model()
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{ollama_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are an intent classifier. Reply with only 'yes' or 'no'."},
-                        {"role": "user", "content": f"Does this request require executing code, managing files, using tools, or controlling a computer? Request: \"{body.message}\""},
-                    ],
-                    "stream": False,
-                    "max_tokens": 2,
-                },
-            )
-            answer = resp.json()["choices"][0]["message"]["content"].strip().lower()
-            needs_agent = answer.startswith("y")
-            return {"needs_agent": needs_agent, "method": "llm"}
-    except Exception:
-        return {"needs_agent": False, "method": "fallback"}
-
-
 @app.post("/api/chat/stream")
-async def chat_stream(body: ChatRequest):
+@limiter.limit("60/minute")
+async def chat_stream(request: Request, body: ChatRequest):
     """
     Streaming chat endpoint using SSE.
     Sends tokens as they arrive from Ollama, then a final [DONE] event
@@ -1040,7 +1036,8 @@ async def chat_stream(body: ChatRequest):
 # ── Agent Mode (Hermes CLI proxy) ────────────────────────────────
 
 @app.post("/api/agent/run")
-async def agent_run(body: AgentRequest):
+@limiter.limit("20/minute")
+async def agent_run(request: Request, body: AgentRequest):
     """
     Agent endpoint: proxies the user message to the local Hermes CLI
     and streams back its output line by line as SSE.
@@ -1073,21 +1070,12 @@ async def agent_run(body: AgentRequest):
         full_output = []
         start_time = time.time()
 
-        # Use WSLBridge to determine working directory
-        work_dir = wsl_bridge.get_working_directory()
-
         # Convert user input: Windows paths → WSL paths
         query = wsl_bridge.convert_user_input(user_message)
 
-        # Inject Windows path context so Hermes knows where to find files
-        # Even when backend runs on Windows (not in WSL), we know the Windows home
-        windows_home = wsl_bridge.windows_home
-        if not windows_home:
-            # Derive from Windows USERNAME env var
-            username = os.environ.get("USERNAME", "")
-            if username:
-                windows_home = f"/mnt/c/Users/{username}"
-
+        # Inject Windows path context
+        username = os.environ.get("USERNAME", "")
+        windows_home = wsl_bridge.windows_home or (f"/mnt/c/Users/{username}" if username else "")
         if windows_home:
             context_prompt = (
                 f"[System: Running via WSL2. Windows home is at {windows_home}. "
@@ -1098,55 +1086,94 @@ async def agent_run(body: AgentRequest):
             )
             query = f"{context_prompt}\n\n{query}"
 
+        # Build command — on Windows use wsl.exe directly to avoid shell quoting issues
+        hermes_bin = "/home/songchao/hermes-agent/venv/bin/hermes"
+        # Try to find hermes path in WSL
+        try:
+            r = await asyncio.create_subprocess_exec(
+                "wsl.exe", "-d", "Ubuntu", "which", "hermes",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            )
+            out, _ = await asyncio.wait_for(r.communicate(), timeout=5)
+            found = out.decode("utf-8", errors="replace").strip()
+            if found:
+                hermes_bin = found
+        except Exception:
+            pass
+
+        cmd = [
+            "wsl.exe", "-d", "Ubuntu",
+            hermes_bin, "chat",
+            "-Q", "--yolo", "--source", "tool",
+            "-q", query,
+        ]
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                HERMES_CMD, "chat",
-                "-Q",          # quiet: no banner/spinner/tool previews
-                "--yolo",      # skip approval prompts
-                "-q", query,
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,  # Ignore WSL stderr warnings
-                cwd=work_dir,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=None,
             )
 
-            # Stream output line by line
-            async for raw_line in proc.stdout:
-                # Try multiple encodings to handle WSL output
-                line = None
-                for encoding in ["utf-8", "gbk", "gb2312", "latin-1"]:
-                    try:
-                        line = raw_line.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                if line is None:
-                    line = raw_line.decode("utf-8", errors="replace")
+            # Hard timeout: kill Hermes if it takes more than 120s
+            try:
+                async with asyncio.timeout(120):
+                    async for raw_line in proc.stdout:
+                        # Try multiple encodings to handle WSL output
+                        line = None
+                        for encoding in ["utf-8", "gbk", "gb2312", "latin-1"]:
+                            try:
+                                line = raw_line.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        if line is None:
+                            line = raw_line.decode("utf-8", errors="replace")
 
-                # Strip ANSI escape codes to avoid duplicate styled/unstyled output
-                import re as _re
-                line = _re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', line)
-                line = _re.sub(r'\x1b\][^\x07]*\x07', '', line)  # OSC sequences
-                line = _re.sub(r'\r', '', line)  # carriage returns
+                        # Strip ANSI escape codes
+                        import re as _re
+                        line = _re.sub(r'\x1b\[[0-9;]*[mGKHFJA-Za-z]', '', line)
+                        line = _re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', line)
+                        line = _re.sub(r'\x1b[()][AB012]', '', line)
+                        line = _re.sub(r'\r', '', line)
+                        # Strip spinner/progress characters
+                        line = _re.sub(r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✗⠿]', '', line)
+                        # Strip box-drawing and other non-printable chars
+                        line = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', line)
 
-                # Filter out WSL warning messages (encoding issues in Windows terminal)
-                # WSL output may contain null bytes and encoding artifacts
-                if 'wsl' in line.lower() or ('localhost' in line and 'WSL' in line):
-                    continue
+                        # Filter WSL warning messages
+                        line_lower = line.lower()
+                        if ('wsl' in line_lower and 'localhost' in line_lower) or \
+                           line.strip().startswith('wsl:'):
+                            continue
 
-                # Skip empty lines that are just whitespace after stripping
-                if not line.strip() and line == '\n':
-                    continue
+                        # Skip blank lines
+                        if not line.strip():
+                            continue
 
-                # Convert WSL paths back to Windows paths for display
-                if wsl_bridge.is_wsl:
-                    line = wsl_bridge.convert_output(line)
+                        # Convert WSL paths back to Windows paths for display
+                        if wsl_bridge.is_wsl:
+                            line = wsl_bridge.convert_output(line)
 
-                full_output.append(line)
-                # Don't render the final done JSON as a token
-                stripped = line.strip()
-                if stripped.startswith('{"done":') or stripped.startswith('{"error":'):
-                    continue
-                yield f"data: {json.dumps({'token': line})}\n\n"
+                        # Filter done/error JSON events and session_id lines
+                        stripped = line.strip()
+                        if (stripped.startswith('{"done":') or
+                                stripped.startswith('{"error":') or
+                                stripped.startswith('session_id:') or
+                                _re.match(r'^session_id:\s*\S+', stripped)):
+                            continue
+
+                        full_output.append(line)
+                        yield f"data: {json.dumps({'token': line})}\n\n"
+
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                yield f"data: {json.dumps({'error': 'Agent timed out after 120s'})}\n\n"
+                return
 
             await proc.wait()
 

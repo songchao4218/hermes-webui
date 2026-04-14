@@ -319,7 +319,24 @@
     .ch-kw  { color: #c678dd; } .ch-num  { color: #d19a66; } .ch-cmt { color: #5c6370; font-style: italic; }
     .ch-fn  { color: #61afef; } .ch-prop { color: #56b6c2; }
 
-</style>
+
+      /* ── Mobile responsive ───────────────────────────────────────── */
+      @media (max-width: 768px) {
+          #sideNav { transform: translateX(-100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); }
+          #sideNav.mobile-open { transform: translateX(0); }
+          #tabChat, #tabSkills, #tabMemory, #tabSettings { margin-left: 0 !important; }
+          #topBar { left: 0 !important; }
+          #mobileMenuBtn { display: flex !important; }
+          #sideNavOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 99; }
+          #sideNavOverlay.active { display: block; }
+          header { padding-left: 1rem !important; padding-right: 1rem !important; }
+          .message-bubble { max-width: 95% !important; }
+      }
+      @media (min-width: 769px) {
+          #mobileMenuBtn { display: none !important; }
+          #sideNavOverlay { display: none !important; }
+      }
+  </style>
 </head>
 <body class="bg-surface text-on-surface font-body min-h-screen overflow-x-hidden">
 <div class="grain-overlay"></div>
@@ -495,8 +512,14 @@
         </button>
     </div>
 
-    <!-- Recent Sessions -->
-    <div id="sessionList" class="mt-2 space-y-1 overflow-y-auto flex-1 min-h-0 custom-scrollbar"></div>
+    <!-- Session Search -->
+      <div class="relative mb-1">
+          <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[16px] text-on-surface-variant/40 pointer-events-none">search</span>
+          <input id="sessionSearch" type="text" placeholder="搜索会话..." oninput="filterSessions(this.value)"
+              class="w-full bg-surface-container-high/50 text-xs text-on-surface pl-8 pr-3 py-2 rounded-lg border border-outline-variant/20 focus:outline-none focus:border-outline-variant/60 placeholder:text-on-surface-variant/30 transition-colors">
+      </div>
+      <!-- Recent Sessions -->
+      <div id="sessionList" class="mt-2 space-y-1 overflow-y-auto flex-1 min-h-0 custom-scrollbar"></div>
 
     <!-- Bottom: Settings + Support -->
     <div class="mt-auto space-y-1 font-['Plus_Jakarta_Sans'] text-sm tracking-tight border-t border-outline-variant pt-4">
@@ -511,10 +534,19 @@
     </div>
 </aside>
 
-<!-- ===================== TOP APP BAR ===================== -->
-<header class="fixed top-0 right-0 left-[256px] h-[56px] flex justify-between items-center px-8 z-40 bg-[#131316]/90 backdrop-blur-sm border-b border-[#514536] border-dashed">
+<!-- Mobile overlay (closes nav when tapping outside) -->
+  <div id="sideNavOverlay" onclick="toggleMobileNav()"></div>
+
+  <!-- ===================== TOP APP BAR ===================== -->
+<header id="topBar" class="fixed top-0 right-0 left-[256px] h-[56px] flex justify-between items-center px-8 z-40 bg-[#131316]/90 backdrop-blur-sm border-b border-[#514536] border-dashed">
     <div class="flex items-center gap-4">
-        <!-- Online Status -->
+        <!-- Mobile hamburger button (hidden on desktop via CSS) -->
+          <button id="mobileMenuBtn" onclick="toggleMobileNav()" title="打开菜单"
+              class="items-center justify-center w-9 h-9 rounded-lg bg-surface-container-high border border-outline-variant/30 text-on-surface-variant hover:text-primary transition-colors"
+              style="display:none;">
+              <span class="material-symbols-outlined text-[20px]">menu</span>
+          </button>
+          <!-- Online Status -->
         <div class="flex items-center gap-2">
             <span id="statusDot" class="w-2 h-2 rounded-full bg-outline"></span>
             <span id="statusText" class="font-headline font-bold text-[10px] uppercase tracking-widest text-outline">Connecting...</span>
@@ -912,7 +944,7 @@
             </div>
             <div class="bg-surface-container-lowest rounded-xl p-4 space-y-2">
                 <h3 class="font-bold text-on-surface text-xs uppercase tracking-widest">Contact</h3>
-                <p>Email: <a href="mailto:your-email@example.com" class="text-primary hover:underline">your-email@example.com</a></p>
+                <p>Email: <a href="mailto:stevensong0421@gmail.com" class="text-primary hover:underline">stevensong0421@gmail.com</a></p>
             </div>
             <div class="pt-4 border-t border-outline-variant/30 space-y-3">
                 <p class="text-xs text-on-surface-variant/60">Version: <span id="localVersion">checking...</span></p>
@@ -1202,6 +1234,7 @@ function switchIdentityTab(tab) {
 
 // ── Language Toggle ─────────────────────────────────────────────
 let currentLang = 'en';
+let HERMES_AVAILABLE = false; // set by loadStatus() from /api/status
 const translations = {
     en: {
         chat: 'Chat', skills: 'Skills', memory: 'Memory', settings: 'Settings',
@@ -1527,6 +1560,7 @@ async function loadStatus() {
         const text = document.getElementById('statusText');
 
         const hermesAvailable = data.hermes?.cli_available;
+        HERMES_AVAILABLE = !!hermesAvailable;
 
         if (hermesAvailable) {
             dot.className = 'w-2 h-2 rounded-full animate-pulse bg-[#ffc676]';
@@ -1857,38 +1891,59 @@ async function deleteSession(sessionId) {
 }
 
 // ── Sessions ────────────────────────────────────────────────────
+// Cache all sessions for search filtering
+let _allSessions = [];
+
 async function loadSessions() {
     try {
         const resp = await apiFetch(apiUrl('/api/sessions'));
         const data = await resp.json();
-        const sessionList = document.getElementById('sessionList');
-        sessionList.innerHTML = '';
-        if (!data.sessions || data.sessions.length === 0) return;
-        const label = document.createElement('p');
-        label.className = 'px-4 text-[10px] uppercase tracking-widest text-on-surface-variant/40 mb-2 font-headline';
-        label.textContent = 'Recent sessions';
-        sessionList.appendChild(label);
-        data.sessions.forEach(session => {
-            const wrapper = document.createElement('div');
-            wrapper.className = 'group flex items-center gap-1 px-2 rounded-lg hover:bg-surface-container-high/50 transition-colors';
-
-            const btn = document.createElement('div');
-            btn.className = `flex-1 px-2 py-2 text-xs truncate hover:text-on-surface cursor-pointer transition-colors ${session.id === currentSessionId ? 'text-[#00daf3]' : 'text-on-surface-variant/60'}`;
-            btn.textContent = session.name || 'Untitled';
-            btn.onclick = () => switchSession(session.id);
-
-            const delBtn = document.createElement('button');
-            delBtn.className = 'opacity-0 group-hover:opacity-100 p-1 text-on-surface-variant/40 hover:text-error transition-all';
-            delBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">close</span>';
-            delBtn.onclick = (e) => { e.stopPropagation(); deleteSession(session.id); };
-
-            wrapper.appendChild(btn);
-            wrapper.appendChild(delBtn);
-            sessionList.appendChild(wrapper);
-        });
+        _allSessions = data.sessions || [];
+        const query = document.getElementById('sessionSearch')?.value || '';
+        renderSessions(_allSessions, query);
     } catch (e) { console.error('Load sessions failed:', e); }
 }
 
+function filterSessions(query) {
+    renderSessions(_allSessions, query);
+}
+
+function renderSessions(sessions, query) {
+    query = query || '';
+    const sessionList = document.getElementById('sessionList');
+    sessionList.innerHTML = '';
+    const q = query.trim().toLowerCase();
+    const filtered = q ? sessions.filter(s => (s.name || 'Untitled').toLowerCase().includes(q)) : sessions;
+    if (!filtered.length) {
+        if (q) {
+            const empty = document.createElement('p');
+            empty.className = 'px-4 text-[10px] text-on-surface-variant/30 text-center py-4';
+            empty.textContent = '没有匹配的会话';
+            sessionList.appendChild(empty);
+        }
+        return;
+    }
+    const label = document.createElement('p');
+    label.className = 'px-4 text-[10px] uppercase tracking-widest text-on-surface-variant/40 mb-2 font-headline';
+    label.textContent = q ? ("找到 " + filtered.length + " 个会话") : 'Recent sessions';
+    sessionList.appendChild(label);
+    filtered.forEach(function(session) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'group flex items-center gap-1 px-2 rounded-lg hover:bg-surface-container-high/50 transition-colors';
+        const btn = document.createElement('div');
+        const isActive = session.id === currentSessionId;
+        btn.className = 'flex-1 px-2 py-2 text-xs truncate hover:text-on-surface cursor-pointer transition-colors ' + (isActive ? 'text-[#00daf3]' : 'text-on-surface-variant/60');
+        btn.textContent = session.name || 'Untitled';
+        btn.onclick = function() { switchSession(session.id); };
+        const delBtn = document.createElement('button');
+        delBtn.className = 'opacity-0 group-hover:opacity-100 p-1 text-on-surface-variant/40 hover:text-error transition-all';
+        delBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">close</span>';
+        delBtn.onclick = function(e) { e.stopPropagation(); deleteSession(session.id); };
+        wrapper.appendChild(btn);
+        wrapper.appendChild(delBtn);
+        sessionList.appendChild(wrapper);
+    });
+}
 async function switchSession(sessionId) {
     currentSessionId = sessionId;
     await loadSessions();
@@ -2037,21 +2092,17 @@ async function sendMessage() {
     addThinkingIndicator();
 
     try {
-        // Step 1: classify intent — agent or plain chat?
-        let needsAgent = false;
-        try {
-            const clf = await apiFetch(apiUrl('/api/chat/classify'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message, model: currentModel, session_id: currentSessionId }),
-            });
-            if (clf.ok) {
-                const clfData = await clf.json();
-                needsAgent = clfData.needs_agent === true;
-            }
-        } catch (e) { /* classify failed, default to chat */ }
+        // Classify intent locally via keywords — no extra API call needed
+        const AGENT_KEYWORDS = [
+            '创建','删除','修改','运行','执行','打开','关闭','安装','下载',
+            '写入','保存','搜索文件','列出文件','截图','浏览器','网页',
+            'create','delete','run','execute','open','install','download',
+            'write file','save file','search file','screenshot','browser',
+        ];
+        const msgLower = message.toLowerCase();
+        const needsAgent = HERMES_AVAILABLE && AGENT_KEYWORDS.some(k => msgLower.includes(k));
 
-        // Step 2: route to agent or stream chat
+        // Route to agent or stream chat
         const endpoint = needsAgent ? '/api/agent/run' : '/api/chat/stream';
         const agentResp = await apiFetch(apiUrl(endpoint), {
             method: 'POST',
@@ -2478,8 +2529,17 @@ class StreamRenderer {
     }
 }
 
-// ── Boot ────────────────────────────────────────────────────────
-init();
+
+// ── Mobile Navigation ──────────────────────────────────────────
+  function toggleMobileNav() {
+      const nav = document.getElementById('sideNav');
+      const overlay = document.getElementById('sideNavOverlay');
+      nav.classList.toggle('mobile-open');
+      overlay.classList.toggle('active');
+  }
+
+  // ── Boot ────────────────────────────────────────────────────────
+  init();
 </script>
 </body>
 </html>

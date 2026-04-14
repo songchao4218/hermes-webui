@@ -6,13 +6,23 @@ import sys
 import os
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
 # Disable auth for tests by default
 os.environ["HERMES_TEST_MODE"] = "1"
+
+# Mock slowapi before importing app — slowapi has pkg_resources issues on Python 3.14
+mock_limiter = MagicMock()
+mock_limiter.limit = lambda *a, **kw: (lambda f: f)  # no-op decorator
+sys.modules.setdefault("slowapi", MagicMock(
+    Limiter=MagicMock(return_value=mock_limiter),
+    _rate_limit_exceeded_handler=MagicMock(),
+))
+sys.modules.setdefault("slowapi.util", MagicMock(get_remote_address=MagicMock()))
+sys.modules.setdefault("slowapi.errors", MagicMock(RateLimitExceeded=Exception))
 
 
 @pytest.fixture(autouse=True)

@@ -39,3 +39,6 @@ stitch/
 ~/.maan/
 ~/.hermes/
 ~/.ollama/
+
+# Internal dev docs (not for public)
+INTERNAL_DEV.md

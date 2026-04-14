@@ -18,7 +18,7 @@ echo.
 :: ============================================
 :: Step 1: Check Python
 :: ============================================
-echo [1/5] Checking Python...
+echo [1/6] Checking Python...
 
 python --version >nul 2>&1
 if %errorlevel% equ 0 (
@@ -46,7 +46,7 @@ exit /b 1
 :: ============================================
 :check_wsl
 echo.
-echo [2/5] Checking WSL2...
+echo [2/6] Checking WSL2...
 
 wsl --status >nul 2>&1
 if %errorlevel% equ 0 (
@@ -84,7 +84,7 @@ exit /b 1
 :: ============================================
 :check_hermes
 echo.
-echo [3/5] Checking Hermes CLI in WSL...
+echo [3/6] Checking Hermes CLI in WSL...
 
 wsl -d Ubuntu bash -c "test -f /home/$(whoami)/hermes-agent/venv/bin/hermes || which hermes" >nul 2>&1
 if %errorlevel% equ 0 (
@@ -103,7 +103,29 @@ if %errorlevel% equ 0 (
 
 :setup_venv
 echo.
-echo [4/5] Setting up environment...
+echo [4/6] Checking Ollama...
+
+ollama --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo     Ollama not found. Please install from https://ollama.com/download
+    echo     After installing, run this script again.
+    pause
+    exit /b 1
+)
+
+:: Start Ollama service if not running
+tasklist /FI "IMAGENAME eq ollama.exe" 2>nul | findstr /I "ollama.exe" >nul
+if %errorlevel% neq 0 (
+    echo     Starting Ollama service...
+    start /B "" ollama serve >nul 2>&1
+    timeout /t 3 /nobreak >nul
+    echo     OK: Ollama started
+) else (
+    echo     OK: Ollama is running
+)
+
+echo.
+echo [5/6] Setting up environment...
 
 if exist "%VENV_DIR%\Scripts\python.exe" (
     echo     OK: Virtual environment exists
@@ -144,7 +166,7 @@ echo     OK: Dependencies installed
 :: ============================================
 :find_port
 echo.
-echo [5/5] Finding available port...
+echo [6/6] Finding available port...
 
 netstat -ano 2>nul | findstr ":8080 " | findstr "LISTENING" >nul 2>&1
 if %errorlevel% neq 0 (

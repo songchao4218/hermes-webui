@@ -64,7 +64,7 @@ class HermesBridge:
             return env_url.rstrip("/")
         config = self.get_config()
         # Try multiple config paths
-        url = config.get("ollama_base_url", "")
+        url = config.get("ollama_base_url", "") or config.get("ollama_url", "")
         if not url:
             model_cfg = config.get("model", {})
             base_url = model_cfg.get("base_url", "")
