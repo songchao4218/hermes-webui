@@ -826,6 +826,28 @@
                 <div id="settingsInfo" class="space-y-4 font-mono text-sm"></div>
             </section>
 
+            <!-- CARD: Memory Debug -->
+            <section class="bg-[#1f1f22] rounded-3xl p-8 border border-outline-variant/10 shadow-2xl relative">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <span class="material-symbols-outlined" style="color: var(--theme-primary);">psychology</span>
+                        <h3 class="text-on-surface font-semibold tracking-tight">Memory Debug</h3>
+                    </div>
+                    <button onclick="refreshMemoryDebug()" class="text-xs px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest transition-colors flex items-center gap-1">
+                        <span class="material-symbols-outlined text-[14px]">refresh</span>
+                        Refresh
+                    </button>
+                </div>
+                <p class="text-xs text-on-surface-variant mb-4">Preview of SOUL.md content (used as system prompt in Chat mode):</p>
+                <div id="memoryDebugContent" class="bg-surface-container-lowest rounded-xl p-4 font-mono text-xs text-on-surface-variant max-h-48 overflow-y-auto border border-outline-variant/20">
+                    <span class="text-outline italic">Loading...</span>
+                </div>
+                <div id="memoryDebugStatus" class="mt-3 flex items-center gap-2 text-xs">
+                    <span class="w-2 h-2 rounded-full bg-outline"></span>
+                    <span class="text-on-surface-variant">Checking...</span>
+                </div>
+            </section>
+
             <!-- Save Changes Button -->
             <div class="flex justify-end pt-4">
                 <button onclick="saveSettings()" class="bg-[#e8a849] hover:bg-[#ffc676] text-[#452b00] px-8 py-4 rounded-xl font-bold flex items-center gap-3 shadow-[0_8px_24px_-4px_rgba(232,168,73,0.3)] transition-all active:scale-95 group">
@@ -1549,6 +1571,8 @@ function showToast(msg) {
 async function init() {
     await loadPersona();
     await Promise.all([ loadStatus(), loadModels(), loadMemories(), loadSkills(), loadSessions() ]);
+    // Refresh memory debug on settings page
+    refreshMemoryDebug();
     messageInput.focus();
 }
 
@@ -1650,7 +1674,54 @@ async function loadMemories() {
         document.getElementById('memorySoul').textContent = data['SOUL.md'] || '(empty)';
         document.getElementById('memoryMemory').textContent = data['MEMORY.md'] || '(empty)';
         document.getElementById('memoryUser').textContent = data['USER.md'] || '(empty)';
+        // Also update debug section
+        updateMemoryDebug(data);
     } catch (e) { console.error('Load memories failed:', e); }
+}
+
+async function refreshMemoryDebug() {
+    const contentEl = document.getElementById('memoryDebugContent');
+    const statusEl = document.getElementById('memoryDebugStatus');
+    contentEl.innerHTML = '<span class="text-outline italic">Loading...</span>';
+    statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-outline animate-pulse"></span><span class="text-on-surface-variant">Loading...</span>';
+
+    try {
+        const resp = await apiFetch(apiUrl('/api/memories'));
+        const data = await resp.json();
+        updateMemoryDebug(data);
+    } catch (e) {
+        contentEl.innerHTML = '<span class="text-error">Failed to load memory files</span>';
+        statusEl.innerHTML = '<span class="w-2 h-2 rounded-full bg-error"></span><span class="text-error">Error loading memories</span>';
+    }
+}
+
+function updateMemoryDebug(data) {
+    const contentEl = document.getElementById('memoryDebugContent');
+    const statusEl = document.getElementById('memoryDebugStatus');
+
+    const soulContent = data['SOUL.md'] || '';
+    const memoryContent = data['MEMORY.md'] || '';
+    const userContent = data['USER.md'] || '';
+
+    // Show SOUL.md preview
+    if (soulContent.trim()) {
+        const lines = soulContent.split('\n').slice(0, 20); // First 20 lines
+        let preview = lines.join('\n');
+        if (soulContent.split('\n').length > 20) preview += '\n... (more)';
+        contentEl.textContent = preview;
+    } else {
+        contentEl.innerHTML = '<span class="text-outline italic">SOUL.md is empty - Chat mode will not have personality context</span>';
+    }
+
+    // Show status
+    const hasContent = soulContent.trim().length > 0;
+    const totalLength = soulContent.length + memoryContent.length + userContent.length;
+    statusEl.innerHTML = `
+        <span class="w-2 h-2 rounded-full ${hasContent ? 'bg-[#4ade80]' : 'bg-error'}"></span>
+        <span class="text-on-surface-variant">SOUL.md: ${hasContent ? '✓ Loaded' : '✗ Empty'} (${soulContent.length} chars)</span>
+        <span class="text-outline mx-1">|</span>
+        <span class="text-on-surface-variant">Total: ${totalLength} chars</span>
+    `;
 }
 
 async function loadSkills() {

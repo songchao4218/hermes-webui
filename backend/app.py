@@ -1139,6 +1139,12 @@ async def agent_run(request: Request, body: AgentRequest):
                         line = _re.sub(r'\r', '', line)
                         # Strip spinner/progress characters
                         line = _re.sub(r'[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✗⠿]', '', line)
+                        # Strip box-drawing characters (table borders, panels)
+                        line = _re.sub(r'[╔═╗║╚╝┌─┐│└┘┏━┓┃┗┛▶▸]', '', line)
+                        # Strip diff format markers
+                        line = _re.sub(r'^[\+\-]{3}\s', '', line)  # --- +++ headers
+                        line = _re.sub(r'^@@\s-[\d,]+\s\+[\d,]+\s@@', '', line)  # @@ chunks
+                        line = _re.sub(r'^(---|\+\+\+)\s', '', line)  # line markers
                         # Strip box-drawing and other non-printable chars
                         line = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', line)
 
@@ -1146,6 +1152,22 @@ async def agent_run(request: Request, body: AgentRequest):
                         line_lower = line.lower()
                         if ('wsl' in line_lower and 'localhost' in line_lower) or \
                            line.strip().startswith('wsl:'):
+                            continue
+
+                        # Filter tool call logs and internal debug output
+                        if any(p in line_lower for p in [
+                            'tool call', 'calling tool', 'executing tool',
+                            'function call', 'invoking', 'running tool',
+                            '[debug]', '[info]', '[warn]', '[error]',
+                            'hermes::', 'agent::', 'system::'
+                        ]):
+                            continue
+
+                        # Filter file operation logs
+                        if any(p in line_lower for p in [
+                            'reading file:', 'writing file:', 'file saved:',
+                            'file created:', 'file deleted:', 'file updated:'
+                        ]):
                             continue
 
                         # Skip blank lines
